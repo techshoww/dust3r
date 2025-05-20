@@ -41,7 +41,8 @@ def reg_dense_depth(xyz, mode):
         return xyz * d.square()
 
     if mode == 'exp':
-        return xyz * torch.expm1(d)
+        # return xyz * torch.expm1(d)
+        return xyz * (torch.exp(d)-1)
 
     raise ValueError(f'bad {mode=}')
 

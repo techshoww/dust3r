@@ -71,6 +71,60 @@ def inference(pairs, model, device, batch_size=8, verbose=True):
 
     return result
 
+def loss_of_one_batch_onnx(batch, session, criterion, device, symmetrize_batch=False, use_amp=False, ret=None):
+    view1, view2 = batch
+    ignore_keys = set(['depthmap', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
+    for view in batch:
+        for name in view.keys():  # pseudo_focal
+            if name in ignore_keys:
+                continue
+            view[name] = view[name].to(device, non_blocking=True)
+
+    if symmetrize_batch:
+        view1, view2 = make_batch_symmetric(batch)
+
+    with torch.cuda.amp.autocast(enabled=bool(use_amp)):
+        # pred1, pred2 = model(view1, view2)
+        
+        res1_pts3d, res1_conf, res2_pts3d_in_other_view, res2_conf = session.run(None, input_feed={"img1":view1["img"].cpu().numpy(), "img2":view2["img"].cpu().numpy()})
+
+        res1_pts3d = torch.from_numpy(res1_pts3d).to(view1['img'].device)
+        res1_conf = torch.from_numpy(res1_conf).to(view1['img'].device)
+        res2_pts3d_in_other_view = torch.from_numpy(res2_pts3d_in_other_view).to(view1['img'].device)
+        res2_conf = torch.from_numpy(res2_conf).to(view1['img'].device)
+
+        pred1 = {}
+        pred1["pts3d"] = res1_pts3d
+        pred1["conf"] = res1_conf
+        pred2 = {}
+        pred2["pts3d_in_other_view"] =res2_pts3d_in_other_view
+        pred2["conf"] = res2_conf
+
+        # loss is supposed to be symmetric
+        with torch.cuda.amp.autocast(enabled=False):
+            loss = criterion(view1, view2, pred1, pred2) if criterion is not None else None
+
+    result = dict(view1=view1, view2=view2, pred1=pred1, pred2=pred2, loss=loss)
+    return result[ret] if ret else result
+
+@torch.no_grad()
+def inference_onnx(pairs, session, device, batch_size=8, verbose=True):
+    if verbose:
+        print(f'>> Inference with model on {len(pairs)} image pairs')
+    result = []
+
+    # first, check if all images have the same size
+    multiple_shapes = not (check_if_same_size(pairs))
+    if multiple_shapes:  # force bs=1
+        batch_size = 1
+
+    for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
+        res = loss_of_one_batch_onnx(collate_with_cat(pairs[i:i + batch_size]), session, None, device)
+        result.append(to_cpu(res))
+
+    result = collate_with_cat(result, lists=multiple_shapes)
+
+    return result
 
 def check_if_same_size(pairs):
     shapes1 = [img1['img'].shape[-2:] for img1, img2 in pairs]

@@ -77,7 +77,8 @@ def signed_log1p(x):
 
 def signed_expm1(x):
     sign = torch.sign(x)
-    return sign * torch.expm1(torch.abs(x))
+    # return sign * torch.expm1(torch.abs(x))
+    return sign * (torch.exp(torch.abs(x))-1)
 
 
 def cosine_schedule(t, lr_start, lr_end):

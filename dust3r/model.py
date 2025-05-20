@@ -13,7 +13,7 @@ import huggingface_hub
 from .utils.misc import fill_default_args, freeze_all_params, is_symmetrized, interleave, transpose_to_landscape
 from .heads import head_factory
 from dust3r.patch_embed import get_patch_embed
-
+from  croco.models.blocks import PositionGetter
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
 
@@ -27,7 +27,7 @@ assert version.parse(hf_version_number) >= version.parse("0.22.0"), ("Outdated h
 def load_model(model_path, device, verbose=True):
     if verbose:
         print('... loading model from', model_path)
-    ckpt = torch.load(model_path, map_location='cpu')
+    ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
     args = ckpt['args'].model.replace("ManyAR_PatchEmbed", "PatchEmbedDust3R")
     if 'landscape_only' not in args:
         args = args[:-1] + ', landscape_only=False)'
@@ -42,6 +42,13 @@ def load_model(model_path, device, verbose=True):
         print(s)
     return net.to(device)
 
+def is_symmetrized_onnx(x, y):
+    if len(x) == len(y) and len(x) == 1:
+        return False  # special case of batchsize 1
+    ok = True
+    for i in range(0, len(x), 2):
+        ok = ok and (x[i] == y[i + 1]) and (x[i + 1] == y[i])
+    return ok
 
 class AsymmetricCroCo3DStereo (
     CroCoNet,
@@ -72,6 +79,7 @@ class AsymmetricCroCo3DStereo (
         self.dec_blocks2 = deepcopy(self.dec_blocks)
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
         self.set_freeze(freeze)
+        self.pos = PositionGetter()(2,24,32, "cpu")
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -126,8 +134,9 @@ class AsymmetricCroCo3DStereo (
 
     def _encode_image(self, image, true_shape):
         # embed the image into patches  (x has size B x Npatches x C)
-        x, pos = self.patch_embed(image, true_shape=true_shape)
-
+        # x, pos = self.patch_embed(image, true_shape=true_shape)
+        x = self.patch_embed(image, true_shape=true_shape)
+        pos = self.pos.to(x.device)
         # add positional embedding without cls token
         assert self.enc_pos_embed is None
 
@@ -207,4 +216,46 @@ class AsymmetricCroCo3DStereo (
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
 
         res2['pts3d_in_other_view'] = res2.pop('pts3d')  # predict view2's pts3d in view1's frame
+        print("res1",res1.keys())
+        print("res2",res2.keys())
         return res1, res2
+
+
+    def _encode_symmetrized_onnx(self, img1, img2, instance1, instance2):
+        B = img1.shape[0]
+        # Recover true_shape when available, otherwise assume that the img shape is the true one
+        # shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
+        # shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
+        shape1 = torch.tensor(img1.shape[-2:])[None].repeat(B, 1)
+        shape2 = torch.tensor(img2.shape[-2:])[None].repeat(B, 1)
+        # warning! maybe the images have different portrait/landscape orientations
+
+        # if is_symmetrized(view1, view2):
+        if is_symmetrized_onnx(instance1, instance2):
+            # computing half of forward pass!'
+            feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1[::2], img2[::2], shape1[::2], shape2[::2])
+            feat1, feat2 = interleave(feat1, feat2)
+            pos1, pos2 = interleave(pos1, pos2)
+        else:
+            feat1, feat2, pos1, pos2 = self._encode_image_pairs(img1, img2, shape1, shape2)
+
+        return (shape1, shape2), (feat1, feat2), (pos1, pos2)
+
+    def forward_onnx(self, img1, img2):
+        instance1 = [0]
+        instance2 = [1]
+        # encode the two images --> B,S,D
+        # (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
+        (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized_onnx(img1, img2, instance1, instance2)
+
+        # combine all ref images into object-centric representation
+        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+
+        with torch.cuda.amp.autocast(enabled=False):
+            res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
+            res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
+
+        res2['pts3d_in_other_view'] = res2.pop('pts3d')  # predict view2's pts3d in view1's frame
+        print("res1",res1.keys())
+        print("res2",res2.keys())
+        return res1['pts3d'], res1['conf'], res2['pts3d_in_other_view'], res2['conf']

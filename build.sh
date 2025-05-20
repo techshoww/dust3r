@@ -1,0 +1,1 @@
+pulsar2 build --input dust3r.onnx --config config_ptq_base.json --output_dir build-output --output_name dust3r.axmodel --target_hardware AX650 --compiler.check 2
