@@ -72,5 +72,21 @@ bash build.sh
 ax_run_model -m dust3r.axmodel -w 10 -r 100
 ```
 ```
-
+   Run AxModel:
+         model: dust3r.axmodel
+          type: 3 Core
+          vnpu: Disable
+      affinity: 0b001
+        warmup: 10
+        repeat: 100
+         batch: { auto: 0 }
+      parallel: false
+   pulsar2 ver: 4.0 ce2fb6a4
+    engine ver: 2.12.0s
+      tool ver: 2.5.1a
+      cmm size: 601133021 Bytes
+  ---------------------------------------------------------------------------
+  min = 319.663 ms   max = 320.067 ms   avg = 319.857 ms  median = 319.856 ms
+   5% = 319.711 ms   90% = 319.953 ms   95% = 320.022 ms     99% = 320.067 ms
+  ---------------------------------------------------------------------------
 ```
